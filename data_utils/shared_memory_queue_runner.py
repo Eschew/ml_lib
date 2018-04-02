@@ -2,7 +2,7 @@ import os, sys, numpy as np, ast
 import tensorflow as tf
 
 import multiprocessing as mp
-import threading, Queue
+import threading
 import ctypes
 
 import time
@@ -54,7 +54,7 @@ class CustomRunner(object):
     data_generating_fn: A data generating fn that should be able to start returning
       numpy data before tf Session has been constructed without any arguments
       Refer to EfficientProcess.test_batch for example
-    
+
     """
     # data_generating_fn should be able to start returning samples before
     # tf session has been constructed, without any arguments
@@ -73,9 +73,6 @@ class CustomRunner(object):
       self.inps.append(
         tf.placeholder(dtype=d.dtype, shape=[None] + list(d.shape[1:])))
       
-    
-#         self.data = tf.placeholder(dtype=tf.float32, shape=[20, 224, 224, 3])
-    
     self.queue = tf.FIFOQueue(shapes=shapes,
                   dtypes=dtypes,
                   capacity=200)
