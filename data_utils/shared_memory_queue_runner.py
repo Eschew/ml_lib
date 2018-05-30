@@ -16,11 +16,12 @@ dtype_ctype_mapping = {np.dtype(k): k for k in ctypes_to_check}
 
 """
 Run like the following
-def test_fn():
+def test_fn(prng=prng):
   t0 = time.time()
   while t0 + 5 > time.time():
     pass
-  return np.random.rand(20, 224, 224, 3).astype(np.float32), np.random.randint(10, size=(20, 1)).astype(np.int32)
+  return prng.rand(20, 224, 224, 3).astype(np.float32), prng.randint(10, size=(20, 1)).astype(np.int32)
+
 cr = CustomRunner(4, 5, test_fn)
 sess = tf.Session()
 cr.start_p_threads(sess)
@@ -49,11 +50,16 @@ class CustomRunner(object):
   def __init__(self, num_processes, num_t_per_process,
          data_generating_fn):
     """
-    num_processes: Number of EfficientProcess to spawn
-    num_t_per_process: The num_threads argument when initializing EfficientProcess
+    num_processes: Number of NumpyDataBatchingProcess to spawn
+    num_t_per_process: The num_threads argument when initializing NumpyDataBatchingProcess
     data_generating_fn: A data generating fn that should be able to start returning
-      numpy data before tf Session has been constructed without any arguments
-      Refer to EfficientProcess.test_batch for example
+      numpy data before tf Session has been constructed.
+      Because np.random isn't thread-safe, fn should accept 
+        ``prng=np.random.RandomState()`` and all np.random calls
+          replaced by prng.
+
+
+      Refer to NumpyDataBatchingProcess.test_batch for example
 
     """
     # data_generating_fn should be able to start returning samples before
@@ -62,7 +68,7 @@ class CustomRunner(object):
     self.num_t_per_process = num_t_per_process
     self.data_fn = data_generating_fn
     
-    self.data = self.data_fn()
+    self.data = self.data_fn(prng=np.random.RandomState())
     
     shapes = []
     dtypes = []
@@ -135,8 +141,10 @@ class CustomRunner(object):
       valid = mp.Value(ctypes.c_bool, lock=True)
       e = mp.Event()
 
-      p = EfficientProcess(self.data_fn, e, memories, valid,
-                 num_threads=self.num_t_per_process)
+      # Each process will create their own np.random.RandomState()
+      # for each of their child threads
+      p = NumpyDataBatchingProcess(self.data_fn, e, memories, valid,
+                                   num_threads=self.num_t_per_process)
       p.daemon=True
       
       processes.append(p)
@@ -186,7 +194,7 @@ class StoppableThread(threading.Thread):
   def get_event(self):
     return self.event
 
-class EfficientProcess(mp.Process):
+class NumpyDataBatchingProcess(mp.Process):
   # Valid bit could be implemented with pipe, could be faster
   def __init__(self, data_fn, stop_event, shared_array, valid_bit, maxsize=10,
                num_threads=2):
@@ -203,7 +211,7 @@ class EfficientProcess(mp.Process):
     Child process simply pops data from its internal queue while the child process' threads
       populate the internal queue.
     """
-    super(EfficientProcess, self).__init__()
+    super(NumpyDataBatchingProcess, self).__init__()
     
     self.data_fn = data_fn
     self.stop_event = stop_event
@@ -223,18 +231,19 @@ class EfficientProcess(mp.Process):
     
   def thread_main(self, **kwargs):
     e = kwargs["event"]
+    prng = kwargs["prng"]
     while not e.is_set():
       if len(self.data_buffer) < self.max_size:
         # works well for single threads
-        self.data_buffer.append(self.data_fn())
+        self.data_buffer.append(self.data_fn(prng=prng))
     
-  def test_batch(self):
+  def test_batch(self, prng):
     # 5 seconds spinwaiting to simulate long batching times
     # Testing purposes
     t0 = time.time()
     while t0 + 5 > time.time():
       pass
-    return np.random.rand(20, 224, 224, 3)
+    return prng.rand(20, 224, 224, 3)
   
   def clean_up(self):
     # send close in case thread is blocked temporarily.
