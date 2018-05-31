@@ -24,6 +24,10 @@ def test_fn(prng=prng):
 
 cr = CustomRunner(4, 5, test_fn)
 sess = tf.Session()
+
+coord = tf.train.Coordinator()
+threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+
 cr.start_p_threads(sess)
 
 out = cr.get_inputs(5)
@@ -54,6 +58,13 @@ class CustomRunner(object):
     num_t_per_process: The num_threads argument when initializing NumpyDataBatchingProcess
     data_generating_fn: A data generating fn that should be able to start returning
       numpy data before tf Session has been constructed.
+      
+      If multiple numpy arrays are being returned, need to ensure that the batching
+      dimension is the same for all numpy arrays. If different batch size inputs
+      are required, pad an extra return tensor1[None, ...], tensor2[None, ...]
+      
+      Afterwards call cr.get_inputs(1) and remove the first dimension.
+      
       Because np.random isn't thread-safe, fn should accept 
         ``prng=np.random.RandomState()`` and all np.random calls
           replaced by prng.
@@ -72,10 +83,16 @@ class CustomRunner(object):
     
     shapes = []
     dtypes = []
+    self.placeholder_shapes = []
     self.inps = []
+    
+    bs = self.data[0].shape[0]
     for d in self.data:
+      assert d.shape[0] == bs
       shapes.append(d.shape[1:])
       dtypes.append(d.dtype)
+      self.placeholder_shapes.append([None] + list(d.shape[1:]))
+    
       self.inps.append(
         tf.placeholder(dtype=d.dtype, shape=[None] + list(d.shape[1:])))
       
@@ -84,13 +101,18 @@ class CustomRunner(object):
                   capacity=200)
     
     self.enqueue_op = self.queue.enqueue_many(self.inps)
-  
+    self.started = False
+    
   def get_inputs(self, batch_size):
     """
-    Return's tensors containing a batch of images and labels
+    Return's a list of tensor(s) containing a batch of data
     """
     images_batch = self.queue.dequeue_up_to(batch_size)
-    return images_batch
+    if type(images_batch) is not list:
+        images_batch = [images_batch]
+        
+    return [tf.placeholder_with_default(v, self.placeholder_shapes[i])
+            for i, v in enumerate(images_batch)]
   
   def thread_main(self, sess, **kwargs):
     """
@@ -104,12 +126,60 @@ class CustomRunner(object):
       for i, v in enumerate(self.valids):
         if v.value:
           # entry is valid
-          sess.run(self.enqueue_op, feed_dict=self._write_fd(i))
+          try:
+            sess.run(self.enqueue_op, feed_dict=self._write_fd(i))
+          except tf.errors.CancelledError as e:
+            return
           v.value = False
           
   def stop(self):
     [e.set() for e in self.p_events]
     [e.set() for e in self.t_events]
+    
+  def is_alive(self, return_obj=False):
+    # returns true if any child process
+    # if return_item, returns the first thread/process encountered alive
+    if not self.started:
+      return False
+    
+    found_obj = None
+    found_alive = False
+
+    for p in self.processes:
+      if found_alive:
+        break
+        
+      if p.is_alive():
+        found_alive = True
+        found_obj = p
+        break
+        
+      for t in p.ts:
+        if t.is_alive():
+          found_alive = True
+          found_obj = t
+          break
+            
+    for t in self.threads:
+      if found_alive:
+        break
+      if t.is_alive():
+        found_alive = True
+        found_obj = t
+        
+        
+    if return_obj:
+      return found_alive, found_obj
+    return found_alive
+        
+  
+  def shut_down(self, sess):
+    # returns a tensor to close tf queue
+    # will only shut down the queue
+    self.stop()
+    sess.run(self.queue.close(cancel_pending_enqueues=True))
+    [t.join() for t in self.threads]
+    [p.join() for p in self.processes]
     
   def _write_fd(self, ind):
     return {inp: self.shared_memories[ind][k] for k, inp in enumerate(self.inps)}
@@ -173,6 +243,8 @@ class CustomRunner(object):
       t.start()
     self.t_events = es
     self.threads = threads
+    
+    self.started = True
       
 class StoppableThread(threading.Thread):
 
@@ -243,12 +315,14 @@ class NumpyDataBatchingProcess(mp.Process):
     t0 = time.time()
     while t0 + 5 > time.time():
       pass
-    return prng.rand(20, 224, 224, 3)
+    return [prng.rand(20, 224, 224, 3),
+            prng.rand(20, 120, 3)]
   
   def clean_up(self):
     # send close in case thread is blocked temporarily.
     # Daemon should kill thread anyways.
     [t.get_event().set() for t in self.ts]
+    [t.join() for t in self.ts]
   
   def run(self):
     [t.start() for t in self.ts]
