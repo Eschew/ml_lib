@@ -10,6 +10,8 @@ class TestCase():
     def __init__(self):
         # no gpu needed for this
         self.config = tf.ConfigProto(device_count={'GPU': 0})
+        
+        
         # get warning out
         sess = tf.Session(config=self.config)
         sess.close()
@@ -73,8 +75,6 @@ class TestCase():
         sess.close()
         
         status, obj = cr.is_alive(True)
-        print status
-        
         
         assert not cr.is_alive()
         t1 = time.time()
